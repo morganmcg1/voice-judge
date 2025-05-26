@@ -4,6 +4,7 @@
 
 # %% Install dependencies
 import os
+import json
 
 # os.system("uv pip install openai weave genai")
 
@@ -34,34 +35,28 @@ class JudgeCriteria(BaseModel):
     thinking: str = Field(description="Thinking about which voice is better.")
     best_voice: List[str] = Field(description="The best voice.")
 
+class JudgeBasics(BaseModel):
+    thinking: str = Field(description="Thinking about the audio given the respective ranking.")
+    how_to_judge_a_voice: List[str] = Field(description="The criteria needed for a LLM to judge \
+the audio and come to the same decision as the human judge about the ranking.")
+    
+
+class JudgeRanking(BaseModel):
+    thinking: str = Field(description="Reasoning about how to rank the voices given the criteria.")
+    ranking: List[str] = Field(description="The ranking of the voices by their ID.")
+
 
 # system_instruction = GEN_VOICE_GUIDELINES
 
+BASE_SYSTEM_INSTRUCTION = """The task is to consider the voice characteristics that lead to the \
+ranking of the audio samples."""
 
-BASE_SYSTEM_INSTRUCTION = """The task is to evaluate generated speech audio on the style, tone, pace, affect and \
-character of each voice sample."""
-
-@weave.op
-async def run_speech_judge(
-    model_name: str,
-    temperature: float,
-    response_model: BaseModel,
-    audio_data: Union[str, bytes, Path, List[Union[str, bytes, Path]]],
-    prompt: str,
-    system_instruction: str = None,
-    max_tokens: int = 4000
-) -> BaseModel:
-    # Initialize client
-    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-    
-    # Handle audio data - convert to list if single item
-    if not isinstance(audio_data, list):
-        audio_data = [audio_data]
-    
-    # Process audio parts
-    parts = [prompt]  # Start with text prompt
-    
-    for audio in audio_data:
+async def get_audio_parts(audio_ls: list, client: genai.Client, initial_prompt: str, prompt_divider: str = "\n\n"):
+    audio_parts = [initial_prompt]
+    for i, audio in enumerate(audio_ls):
+        if i > 0:
+            audio_parts.append(prompt_divider.format(input_order=i + 1))
+            
         if isinstance(audio, (str, Path)):
             # File path - check size and upload if needed
             audio_path = Path(audio)
@@ -73,25 +68,56 @@ async def run_speech_judge(
             if file_size_mb > 20:
                 # Upload large files
                 uploaded_file = await client.aio.files.upload(path=str(audio_path))
-                parts.append(uploaded_file)
+                audio_parts.append(uploaded_file)
             else:
                 # Read and inline small files
                 with open(audio_path, 'rb') as f:
                     audio_bytes = f.read()
                 mime_type = _get_mime_type(audio_path.suffix)
-                parts.append(types.Part.from_bytes(
+                audio_parts.append(types.Part.from_bytes(
                     data=audio_bytes,
                     mime_type=mime_type
                 ))
                 
         elif isinstance(audio, bytes):
             # Raw bytes - assume MP3 if not specified
-            parts.append(types.Part.from_bytes(
+            audio_parts.append(types.Part.from_bytes(
                 data=audio,
                 mime_type='audio/mp3'
             ))
         else:
             raise ValueError(f"Unsupported audio data type: {type(audio)}")
+    
+    return audio_parts
+
+@weave.op
+async def run_speech_llm(
+    model_name: str,
+    temperature: float,
+    response_model: BaseModel,
+    audio_data: Union[str, bytes, Path, List[Union[str, bytes, Path]]],
+    prompt: str,
+    system_instruction: str = None,
+    max_tokens: int = 4000,
+    initial_audio_parts_prompt: str = "\n\nRank 1 voice:\n",
+    audio_parts_prompt_divider: str = "\n\nRank {input_order} voice:\n"
+) -> BaseModel:
+    # Initialize client
+    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+    
+    # Handle audio data - convert to list if single item
+    if not isinstance(audio_data, list):
+        audio_data = [audio_data]
+    
+    # Process audio parts
+    parts = [prompt]  # Start with text prompt
+
+    audio_parts = await get_audio_parts(
+        audio_ls=audio_data, 
+        client=client,
+        initial_prompt=initial_audio_parts_prompt,
+        prompt_divider=audio_parts_prompt_divider)
+    parts.extend(audio_parts)
     
     # Configure generation with structured output
     generation_config = types.GenerateContentConfig(
@@ -110,7 +136,6 @@ async def run_speech_judge(
     )
     
     # Parse and validate response
-    import json
     json_content = json.loads(response.text)
     return response_model.model_validate(json_content)
 

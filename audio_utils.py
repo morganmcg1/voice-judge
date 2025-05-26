@@ -10,7 +10,6 @@ from IPython.display import HTML as IPythHTML
 from IPython.display import Audio as IPythAudio
 from IPython.display import display
 from weave.flow.annotation_spec import AnnotationSpec
-import json
 
 
 def save_wave_read_to_file(wave_read_obj, filename):
@@ -115,9 +114,10 @@ class AudioRankerSequential:
                 self.raw_audio_samples.append({
                     "widget_internal_id": internal_widget_id, # Widget's internal unique ID for selection
                     "id": original_input_name, # Original name/id from input, for logging and final output
-                    "original_input_index": i, # Store the original index
+                    "original_input_order": item.get("original_input_order", i) if isinstance(item, dict) else i, # Get from input or use index
                     "data": audio_bytes,
-                    "anonymized_label": anonymized_label # For UI display
+                    "anonymized_label": anonymized_label, # For UI display
+                    "short_hash": short_hash # Store the generated hash
                 })
             else:
                 print(f"Warning: Failed to process audio bytes for {original_input_name}. Skipping.")
@@ -163,9 +163,9 @@ class AudioRankerSequential:
                                 "rank": {"type": "integer"},
                                 "id": {"type": "string"},  # Original ID provided by user
                                 "original_input_order": {"type": "integer"}, # Original index
-                                # "widget_internal_id": {"type": "string"}, # Optional: if you want to log this too
+                                "short_hash": {"type": "string"}, # Added short_hash
                             },
-                            "required": ["rank", "id", "original_input_order"],
+                            "required": ["rank", "id", "original_input_order", "short_hash"], # Added short_hash
                         },
                     },
                     "all_presented_sample_widget_ids": {"type": "array", "items": {"type": "string"}}, # IDs used internally by widget
@@ -312,11 +312,11 @@ class AudioRankerSequential:
                     self.final_ranking_list.append({
                         'rank': rank_num,
                         'id': sample_details['id'], # Use the original ID for the output
-                        'original_input_order': sample_details['original_input_order']
-                        # 'widget_internal_id': sample_details['widget_internal_id'] # Optional: if you want this in output
+                        'original_input_order': sample_details['original_input_order'],
+                        'short_hash': sample_details.get('short_hash', 'unknown_hash') # Add the short_hash
                     })
                 else: # Should ideally not happen if logic is correct
-                    self.final_ranking_list.append({'rank': rank_num, 'id': "Unknown", 'original_input_order': -1, 'widget_internal_id': audio_widget_id})
+                    self.final_ranking_list.append({'rank': rank_num, 'id': "Unknown", 'original_input_order': -1, 'widget_internal_id': audio_widget_id, 'short_hash': 'unknown_hash'})
             
             with self.messages_output:
                 print("Final Rankings (UI display based on anonymized labels):")
@@ -415,7 +415,7 @@ class AudioRankerSequential:
     def get_final_rankings(self):
         """
         Returns the final list of ranked audio samples if all samples have been ranked.
-        Each item in the list is a dict: {'rank': int, 'name': str, 'id': str}
+        Each item in the list is a dict: {'rank': int, 'id': str, 'original_input_order': int, 'short_hash': str}
         Returns None if ranking is not complete.
         """
         if not self.unranked_audio_ids and self.final_ranking_list:
