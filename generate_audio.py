@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import wave
 from datetime import datetime
@@ -9,8 +8,6 @@ from typing import Any
 import weave
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
-from openai.helpers import LocalAudioPlayer
-from pydantic import BaseModel, Field
 
 load_dotenv()
 
@@ -18,27 +15,11 @@ load_dotenv()
 TTS_MODEL_NAME = "gpt-4o-mini-tts"
 VOICE = "onyx"
 VOICE_INSTRUCTIONS_DATASET_NAME = "voice_instructions"
-N_AUDIO_GENERATIONS = 5  # Number of audio files to generate
+N_AUDIO_GENERATIONS = 2  # Number of audio files to generate
 TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M")
 
 weave.init("wandb-voice-ai/voice-judge")
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# character_text = weave.StringPrompt(
-#     """Hey boy! You fixing that satellite dish already? Good! I been missing my stories for three weeks!"""
-# )
-character_text = weave.StringPrompt(
-    """What are you doing up there? GTA 6 was supposed to be out by now — you coding the whole thing by hand or what?!"""
-)
-weave.publish(character_text, name="character_text")
-
-
-class AudioGeneration(BaseModel):
-    voice_instructions_id: str = Field(description="The ID of the voice instructions used")
-    voice_instructions: str = Field(description="The voice instructions text")
-    audio_file_path: str = Field(description="Path to the generated audio file")
-    tts_model_name: str = Field(description="The TTS model used")
-    voice: str = Field(description="The voice used for generation")
 
 
 @weave.op
@@ -50,7 +31,7 @@ async def generate_speech_from_instructions(
     voice: str = VOICE,
     response_format: str = "wav",
     timestamp: str = TIMESTAMP,
-) -> dict[Any, str]:
+) -> dict[str, Any]:
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     audio_dir = Path("generated_audio")
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -66,45 +47,29 @@ async def generate_speech_from_instructions(
         content = resp.content if hasattr(resp, "content") else await resp.aread()
         with open(speech_file_path, "wb") as f:
             f.write(content)
+        
+        # Open the audio file with wave
+        audio_obj = wave.open(speech_file_path.as_posix(), "rb")
+                
         return {
-            "audio": wave.open(speech_file_path.as_posix(), "rb"),
+            "audio": audio_obj,
+            "success": True,
             "audio_file_path": str(speech_file_path),
+            "voice_instructions_id": voice_instructions_id,
         }
     except Exception as e:
-        print(f"Exception occurred while generating audio: {e}")
-        return {"audio": None, "audio_file_path": ""}
+        print(f"Exception occurred while generating audio for instruction ID {voice_instructions_id}: {e}")
+        return {
+            "audio": None,
+            "success": False,
+            "audio_file_path": "",
+            "voice_instructions_id": voice_instructions_id,
+            "error_message": str(e),
+        }
 
 
 @weave.op
-async def download_voice_dataset() -> list:
-    """Download the voice instructions dataset from Weave."""
-    try:
-        # Get the dataset reference
-        dataset_ref = weave.ref(VOICE_INSTRUCTIONS_DATASET_NAME).get()
-
-        if dataset_ref is None:
-            print(f"Dataset '{VOICE_INSTRUCTIONS_DATASET_NAME}' not found")
-            return []
-
-        # Access the rows from the dataset
-        if hasattr(dataset_ref, "rows"):
-            # If it's a Table or WeaveTable, convert to list
-            if hasattr(dataset_ref.rows, "to_pylist_notags"):
-                return dataset_ref.rows.to_pylist_notags()
-            elif hasattr(dataset_ref.rows, "__iter__"):
-                return list(dataset_ref.rows)
-            else:
-                return dataset_ref.rows
-        else:
-            return list(dataset_ref)
-
-    except Exception as e:
-        print(f"Error downloading dataset: {e}")
-        return []
-
-
-@weave.op
-async def generate_speech_batch(voice_instructions_data: list, n_generations: int = N_AUDIO_GENERATIONS):
+async def generate_speech_batch(voice_instructions_data: list, character_text: str = None, n_generations: int = N_AUDIO_GENERATIONS):
     selected_instructions = voice_instructions_data[:n_generations]
     results = []
     for instruction_data in selected_instructions:
@@ -115,14 +80,13 @@ async def generate_speech_batch(voice_instructions_data: list, n_generations: in
             tts_model_name=TTS_MODEL_NAME,
             voice=VOICE,
         )
-        results.append(res.get("audio_file_path"))
+        results.append(res)
     return results
 
 
 async def main():
     """Main function to download dataset and generate audio."""
     print("Downloading voice instructions dataset from Weave...")
-    # voice_instructions_data = await download_voice_dataset()
     ds_ref = weave.ref(VOICE_INSTRUCTIONS_DATASET_NAME).get()
     voice_instructions_data = list(ds_ref.rows)
 
@@ -133,34 +97,53 @@ async def main():
     print(f"Found {len(voice_instructions_data)} voice instructions in dataset")
     print(f"Generating audio for {min(N_AUDIO_GENERATIONS, len(voice_instructions_data))} instructions...")
 
-    # Generate audio files
-    audio_results = await generate_speech_batch(voice_instructions_data, N_AUDIO_GENERATIONS)
+    character_text = weave.ref("character_text").get()
 
-    print(f"Successfully generated {len(audio_results)} audio files")
-
-    # Create summary data for logging
-    audio_generations = []
-    for i, (instruction_data, audio_result) in enumerate(
-        zip(voice_instructions_data[:N_AUDIO_GENERATIONS], audio_results)
-    ):
-        audio_file_path = audio_result[1] if audio_result else ""
-        audio_gen = AudioGeneration(
-            voice_instructions_id=instruction_data["voice_instructions_id"] + "_" + TIMESTAMP,
-            voice_instructions=instruction_data["voice_instructions"],
-            audio_file_path=audio_file_path,
-            tts_model_name=TTS_MODEL_NAME,
-            voice=VOICE,
-        )
-        audio_generations.append(audio_gen.model_dump())
-
-    # Create and publish audio dataset to Weave
-    audio_dataset = weave.Dataset(
-        name="generated_speech", rows=weave.Dataset.convert_to_table(audio_generations)
+    audio_generation_results = await generate_speech_batch(
+        voice_instructions_data=voice_instructions_data,
+        character_text=character_text,
+        n_generations=N_AUDIO_GENERATIONS
     )
 
-    # Publish the dataset to Weave
-    dataset_ref = weave.publish(audio_dataset)
-    print(f"Audio generation dataset published to Weave: {dataset_ref}")
+    successful_generations_count = 0
+    audio_generations = []
+
+    for i, instruction_data in enumerate(voice_instructions_data[:N_AUDIO_GENERATIONS]):
+        # Find the corresponding result for the current instruction_data
+        current_result = next((r for r in audio_generation_results if r["voice_instructions_id"] == instruction_data["voice_instructions_id"]), None)
+
+        if current_result and current_result["success"]:
+            audio_file_path = current_result["audio_file_path"]
+            audio_gen = {
+                "voice_instructions_id": instruction_data["voice_instructions_id"] + "_" + TIMESTAMP,
+                "voice_instructions": instruction_data["voice_instructions"],
+                "audio_file_path": audio_file_path,
+                "tts_model_name": TTS_MODEL_NAME,
+                "voice": VOICE,
+                "audio": current_result["audio"]
+            }
+            audio_generations.append(audio_gen)
+            
+            successful_generations_count += 1
+        elif current_result:
+            print(f"Skipping instruction ID {instruction_data['voice_instructions_id']} due to error: {current_result.get('error_message', 'Unknown error')}")
+        else:
+            # This case should ideally not happen if generate_speech_batch returns a result for every input
+            print(f"Warning: No result found for instruction ID {instruction_data['voice_instructions_id']}")
+
+    print(f"Successfully generated {successful_generations_count} audio files out of {len(voice_instructions_data[:N_AUDIO_GENERATIONS])} attempts.")
+
+    # Create and publish audio dataset to Weave only if there are successful generations
+    if audio_generations:
+        # Dataset with metadata only (original approach)
+        audio_dataset = weave.Dataset(
+            name="generated_speech_audio", 
+            rows=weave.Dataset.convert_to_table(audio_generations)
+        )
+        dataset_ref = weave.publish(audio_dataset)
+        print(f"Audio generation dataset published to Weave: {dataset_ref}")
+    else:
+        print("No audio files were successfully generated. Skipping dataset publication.")
 
     # # Save to local JSON file as backup
     # audio_dir = Path("generated_audio")
