@@ -15,7 +15,8 @@ load_dotenv()
 TTS_MODEL_NAME = "gpt-4o-mini-tts"
 VOICE = "onyx"
 VOICE_INSTRUCTIONS_DATASET_NAME = "voice_instructions"
-N_AUDIO_GENERATIONS = 2  # Number of audio files to generate
+GENERATED_AUDIO_DATASET_NAME = "generated_speech_audio_test"
+N_AUDIO_GENERATIONS = 12  # Number of audio files to generate
 TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M")
 
 weave.init("wandb-voice-ai/voice-judge")
@@ -137,7 +138,7 @@ async def main():
     if audio_generations:
         # Dataset with metadata only (original approach)
         audio_dataset = weave.Dataset(
-            name="generated_speech_audio", 
+            name=GENERATED_AUDIO_DATASET_NAME, 
             rows=weave.Dataset.convert_to_table(audio_generations)
         )
         dataset_ref = weave.publish(audio_dataset)
