@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+generated_audio/
+voice_instructions/
+
 # C extensions
 *.so
 
