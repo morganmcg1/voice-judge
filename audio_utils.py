@@ -273,9 +273,17 @@ class AudioRanker:
         image_widget = None
         if self.image_path:
             try:
-                with open(self.image_path, "rb") as f:
-                    image_data = f.read()
-                image_widget = widgets.Image(value=image_data, format='jpg', width=800, height=300) # Set width and height
+                # Handle both local files and Colab paths
+                import os
+                if os.path.exists(self.image_path):
+                    with open(self.image_path, "rb") as f:
+                        image_data = f.read()
+                    # Detect image format from extension
+                    ext = os.path.splitext(self.image_path)[1].lower()
+                    img_format = ext[1:] if ext in ['.jpg', '.jpeg', '.png', '.gif'] else 'jpg'
+                    image_widget = widgets.Image(value=image_data, format=img_format, width=800, height=300)
+                else:
+                    image_widget = widgets.Label(f"Image not found: {self.image_path}")
             except FileNotFoundError:
                 image_widget = widgets.Label(f"Image not found: {self.image_path}")
             except Exception as e:
