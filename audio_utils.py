@@ -5,6 +5,7 @@ import hashlib # For hashing names/ids
 from typing import Any
 import datetime # Added import
 import asyncio # Added import for async operations
+import base64 # For encoding audio in Colab
 
 import ipywidgets as widgets
 import weave
@@ -257,15 +258,40 @@ class AudioRanker:
 
     def _build_ui(self):
         audio_display_items = [widgets.HTML("<h3>Which voice sample suits this character?</h3>")]
+        
+        # Check if we're in Colab
+        try:
+            import google.colab
+            in_colab = True
+        except ImportError:
+            in_colab = False
+        
         for i, sample in enumerate(self.raw_audio_samples):
-            audio_player_out = widgets.Output()
-            with audio_player_out:
-                display(IPythAudio(data=sample['data'], autoplay=False))
+            if in_colab:
+                # For Colab, use HTML audio elements instead of Output widgets
+                import base64
+                audio_b64 = base64.b64encode(sample['data']).decode()
+                audio_html = f'''
+                <div style="margin-bottom: 10px;">
+                    <label>{sample['anonymized_label']}</label><br>
+                    <audio controls style="width: 300px;">
+                        <source src="data:audio/wav;base64,{audio_b64}" type="audio/wav">
+                        Your browser does not support the audio element.
+                    </audio>
+                </div>
+                '''
+                item_box = widgets.HTML(audio_html)
+            else:
+                # Original code for non-Colab environments
+                audio_player_out = widgets.Output()
+                with audio_player_out:
+                    display(IPythAudio(data=sample['data'], autoplay=False))
+                
+                item_box = widgets.VBox([
+                    widgets.Label(sample['anonymized_label']),
+                    audio_player_out
+                ], layout=widgets.Layout(margin='0 0 10px 0'))
             
-            item_box = widgets.VBox([
-                widgets.Label(sample['anonymized_label']),
-                audio_player_out
-            ], layout=widgets.Layout(margin='0 0 10px 0'))
             audio_display_items.append(item_box)
         audio_players_vbox = widgets.VBox(audio_display_items) # Renamed for clarity
 
@@ -448,9 +474,19 @@ class AudioRanker:
     def display_widget(self):
         """Displays the ranking widget in a Jupyter environment."""
         if hasattr(self, "widget"):
-            display(self.widget)
+            # Debug info for Colab
+            print(f"Debug: Widget type: {type(self.widget)}")
+            print(f"Debug: Number of audio samples: {len(self.raw_audio_samples)}")
+            
+            # Force display in Colab
+            from IPython.display import display as ipy_display
+            ipy_display(self.widget)
+            
+            # Return the widget for direct display
+            return self.widget
         else:
             print("AudioRanker widget could not be initialized properly (e.g., no valid audio samples).")
+            return None
 
     def get_final_rankings(self):
         """
