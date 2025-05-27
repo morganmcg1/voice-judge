@@ -26,8 +26,8 @@ class PreferredVoicePatterns(BaseModel):
 
 
 class PreferenceLearner:
-    def __init__(self):
-        self.model_name = PREFERENCE_LEARNER_MODEL
+    def __init__(self, model_name: str = PREFERENCE_LEARNER_MODEL):
+        self.model_name = model_name
         self.temperature = 1.0
         self.n_comparisons_to_use = 5
         self.comparisons = []
@@ -54,6 +54,7 @@ class PreferenceLearner:
         audio_comparison_parts = self._construct_audio_comparison_parts(ranking, samples_to_rank)
         self.comparisons.append(audio_comparison_parts)
     
+    @weave.op
     async def update(self, ranking, samples_to_rank):
         print("Updating comparisons...")
         self._update_comparisons(ranking, samples_to_rank)
@@ -109,11 +110,11 @@ emerging patterns passed to the next iteration of pattern update.]
         pattern_update_prompt.extend(recent_comparisons_window)
         pattern_update_prompt.append(recent_comparisons_prompt_part_2)
 
-        await self._run_pattern_update(pattern_update_prompt)
+        await self.run_pattern_update(pattern_update_prompt)
         return self.patterns
     
     @weave.op
-    async def _run_pattern_update(self, pattern_update_prompt):
+    async def run_pattern_update(self, pattern_update_prompt):
         pattern_update = await run_speech_llm(
             system_instruction=PATTERN_UPDATE_SYSTEM_INSTRUCTION,
             prompt=pattern_update_prompt,
@@ -129,4 +130,8 @@ emerging patterns passed to the next iteration of pattern update.]
         pprint(f"reasoning: {pattern_update.reasoning}")
         pprint(f"strong: {pattern_update.strong}")
         pprint(f"emerging: {pattern_update.emerging}")
+        return {"pattern_update": pattern_update,
+                "strong_patterns": self.patterns['strong'],
+                "emerging_patterns": self.patterns['emerging']
+                }
         
