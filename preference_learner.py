@@ -6,7 +6,7 @@ from pprint import pprint
 
 PREFERENCE_LEARNER_MODEL =  "gemini-2.0-flash" #"gemini-2.5-pro-preview-05-06",  # "gemini-2.0-flash"
 
-USER_CONTEXT_PROMPT = "I am tring to select a voice for my video game character. The character is a man in his late 50's and \
+USER_CONTEXT_PROMPT = "I am trying to select a voice for my video game character. The character is a man in his late 50's and \
 is a little on the wild side."
 
 PATTERN_UPDATE_SYSTEM_INSTRUCTION = """Your task is to examine a list of pairwise rankings of voice audio \
@@ -109,8 +109,8 @@ emerging patterns passed to the next iteration of pattern update.]
         pattern_update_prompt.extend(recent_comparisons_window)
         pattern_update_prompt.append(recent_comparisons_prompt_part_2)
 
-        pattern_update = await self._run_pattern_update(pattern_update_prompt)
-        return pattern_update
+        await self._run_pattern_update(pattern_update_prompt)
+        return self.patterns
     
     @weave.op
     async def _run_pattern_update(self, pattern_update_prompt):
