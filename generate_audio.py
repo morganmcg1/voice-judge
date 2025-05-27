@@ -16,7 +16,7 @@ TTS_MODEL_NAME = "gpt-4o-mini-tts"
 VOICE = "onyx"
 VOICE_INSTRUCTIONS_DATASET_NAME = "voice_instructions"
 GENERATED_AUDIO_DATASET_NAME = "generated_speech_audio_test"
-N_AUDIO_GENERATIONS = 12  # Number of audio files to generate
+N_AUDIO_GENERATIONS = 20  # Number of audio files to generate
 TIMESTAMP = datetime.now().strftime("%Y%m%d_%H%M")
 
 weave.init("wandb-voice-ai/voice-judge")
