@@ -4,6 +4,7 @@ import wave  # Ensure wave is imported
 import hashlib # For hashing names/ids
 from typing import Any
 import datetime # Added import
+import asyncio # Added import for async operations
 
 import ipywidgets as widgets
 import weave
@@ -11,6 +12,8 @@ from IPython.display import HTML as IPythHTML
 from IPython.display import Audio as IPythAudio
 from IPython.display import display
 from weave.flow.annotation_spec import AnnotationSpec
+
+from judge import BinaryVoiceRank
 
 
 def save_wave_read_to_file(wave_read_obj, filename):
@@ -29,7 +32,7 @@ def wave_read_to_wav_bytes(wave_read_obj):
     return buf.getvalue()
 
 
-class AudioRankerSequential:
+class AudioRanker:
     """
     An IPython widget to sequentially rank N audio samples.
 
@@ -44,12 +47,12 @@ class AudioRankerSequential:
         audio_samples_input: list,
         image_path: str = None,
         weave_client: Any = None,
-        target_call_id: str = None,
-        scorer_name: str = "AudioSequentialRanking",
+        target_call: Any = None, # Changed from target_call_id
+        scorer_name: str = "AudioRanker",
         scorer_description: str = "Sequential ranking of multiple audio samples.",
     ):
         """
-        Initializes the AudioRankerSequential widget.
+        Initializes the AudioRanker widget.
 
         Args:
             audio_samples_input: A list of audio samples. Each item can be:
@@ -60,13 +63,14 @@ class AudioRankerSequential:
             image_path: Path to an image associated with the audio samples.
             weave_client: Optional initialized Weave client for logging feedback.
                           If None, Weave logging is disabled.
-            target_call_id: Optional Weave call ID to associate this ranking feedback with.
-                            Required if weave_client is provided and logging is desired.
+            target_call: Optional Weave call object to associate this ranking feedback with.
+                         Required if weave_client is provided and logging/scoring is desired.
             scorer_name: Name for the Weave Human Annotation Scorer.
             scorer_description: Description for the Weave Human Annotation Scorer.
         """
         self.weave_client = weave_client
-        self.target_call_id = target_call_id
+        self.target_call = target_call # Store the call object
+        self.target_call_id = target_call.id if target_call else None # Extract ID for existing logic
         self.scorer_name = scorer_name
         self.scorer_description = scorer_description
         self.scorer_uri = None  # Will be set after publishing
@@ -135,13 +139,13 @@ class AudioRankerSequential:
         self._build_ui()
 
         # Setup Weave scorer now that UI elements like messages_output exist
-        if self.weave_client and self.target_call_id:
+        if self.weave_client and self.target_call: # Check for target_call object
             self._setup_weave_scorer()
-        elif self.weave_client and not self.target_call_id:
+        elif self.weave_client and not self.target_call: # If client but no call object
             with self.messages_output:
                 display(
                     IPythHTML(
-                        "<p style='color:orange;'>Warning: Weave client provided, but no target_call_id. Weave ranking annotation will be disabled.</p>"
+                        "<p style='color:orange;'>Warning: Weave client provided, but no target_call object. Weave ranking annotation will be disabled.</p>"
                     )
                 )
 
@@ -233,6 +237,12 @@ class AudioRankerSequential:
         self.current_rank_to_assign = 1
         self.final_ranking_list = []
         self.ranking_completion_timestamp = None # Added timestamp
+        # Clear previous scorer messages if any, on reset
+        if hasattr(self, "messages_output") and self.messages_output:
+            # This might be too aggressive if other messages are important.
+            # Consider a more targeted way to clear scorer-specific messages if needed.
+            # For now, clearing all messages on reset to avoid stale scorer status.
+            self.messages_output.clear_output(wait=True)
 
     def _get_unranked_sample_options(self):
         options = [("Select an audio...", None)]
@@ -350,49 +360,48 @@ class AudioRankerSequential:
                     display_label = sample_details['anonymized_label'] if sample_details else f"Unknown (Widget ID: {audio_widget_id})"
                     print(f"  Rank {rank_num}: {display_label}") # (Original ID: {sample_details['id'] if sample_details else 'N/A'}
 
-                # Log to Weave if client, call_id, and scorer_uri are available
-                if self.weave_client and self.target_call_id and self.scorer_uri:
+                # Log to Weave if client, target_call object, and scorer_uri are available
+                if self.weave_client and self.target_call and self.scorer_uri: # Check for self.target_call
                     try:
-                        target_call = self.weave_client.get_call(self.target_call_id)
-                        if not target_call:
-                            display(
-                                IPythHTML(
-                                    f"<p style='color:red;'>Error: Could not retrieve Weave call '{self.target_call_id}' for annotation.</p>"
-                                )
-                            )
-                        else:
-                            ranking_session_id = str(uuid.uuid4())
-                            # Changed to log widget_internal_id for all_presented_sample_ids as it's what the widget presents
-                            all_sample_widget_ids = [s["widget_internal_id"] for s in self.raw_audio_samples]
-                            
-                            data_for_scorer = {
-                                "ranking_session_id": ranking_session_id,
-                                "target_call_id": self.target_call_id,
-                                "ranked_samples": self.final_ranking_list, # Already in the new format
-                                "all_presented_sample_widget_ids": all_sample_widget_ids,
-                            }
+                        # We already have self.target_call, no need to fetch it again
+                        ranking_session_id = str(uuid.uuid4())
+                        all_sample_widget_ids = [s["widget_internal_id"] for s in self.raw_audio_samples]
+                        
+                        data_for_scorer = {
+                            "ranking_session_id": ranking_session_id,
+                            "target_call_id": self.target_call_id, # Still log the ID
+                            "ranked_samples": self.final_ranking_list, # Already in the new format
+                            "all_presented_sample_widget_ids": all_sample_widget_ids,
+                        }
 
-                            payload_to_send = {"value": data_for_scorer}
+                        payload_to_send = {"value": data_for_scorer}
 
-                            target_call.feedback.add(
-                                feedback_type=f"wandb.annotation.{self.scorer_name}",
-                                payload=payload_to_send, # Use the wrapped payload
-                                annotation_ref=self.scorer_uri
-                            )
+                        self.target_call.feedback.add( # Use self.target_call directly
+                            feedback_type=f"wandb.annotation.{self.scorer_name}",
+                            payload=payload_to_send, # Use the wrapped payload
+                            annotation_ref=self.scorer_uri
+                        )
+                        with self.messages_output: # Ensure messages_output is used here too
                             display(IPythHTML(f"<p style='color:green;'>Ranking successfully logged as annotation to Weave call '{self.target_call_id}' (Session ID: {ranking_session_id}).</p>"))
+                        
+                        # Now, also apply the scorer asynchronously
+                        asyncio.create_task(self._apply_scorer_async())
+
                     except Exception as e:
-                        display(IPythHTML(f"<p style='color:red;'>Error logging ranking to Weave: {e}</p>"))
+                        with self.messages_output: # Ensure messages_output is used here too
+                            display(IPythHTML(f"<p style='color:red;'>Error logging ranking to Weave or preparing to apply scorer: {e}</p>"))
                 elif self.weave_client:
                     missing_parts = []
-                    if not self.target_call_id:
-                        missing_parts.append("target_call_id")
+                    if not self.target_call: # Check for target_call object
+                        missing_parts.append("target_call object")
                     if not self.scorer_uri:
                         missing_parts.append("scorer_uri (scorer setup may have failed)")
-                    display(
-                        IPythHTML(
-                            f"<p style='color:orange;'>Skipping Weave annotation log: Missing {', '.join(missing_parts)}.</p>"
+                    with self.messages_output: # Ensure messages_output is used here too
+                        display(
+                            IPythHTML(
+                                f"<p style='color:orange;'>Skipping Weave annotation log and scorer application: Missing {', '.join(missing_parts)}.</p>"
+                            )
                         )
-                    )
         else:
             self.rank_assignment_label.value = f"Select audio for Rank {self.current_rank_to_assign}:"
             self.rank_selection_dropdown.options = self._get_unranked_sample_options()
@@ -442,10 +451,76 @@ class AudioRankerSequential:
         Returns None if ranking is not complete.
         """
         if not self.unranked_audio_ids and self.final_ranking_list and self.ranking_completion_timestamp:
+            preferred_id = None
+            rejected_id = None
+            if self.final_ranking_list:
+                for item in self.final_ranking_list:
+                    if item['rank'] == 1:
+                        preferred_id = item['id']
+                    if item['rank'] == self.num_samples: # Last rank
+                        rejected_id = item['id']
+            
             return {
                 "rankings": self.final_ranking_list,
-                "completed_at": self.ranking_completion_timestamp.strftime("%Y-%m-%d_%H-%M")
+                "completed_at": self.ranking_completion_timestamp.strftime("%Y-%m-%d_%H-%M"),
+                "preferred_id": preferred_id,
+                "rejected_id": rejected_id
             }
         else:
             # print("Ranking is not yet complete or has been reset.") # Console noise
             return None
+
+    async def _apply_scorer_async(self):
+        """Applies the scorer asynchronously using the target_call object."""
+        if not hasattr(self, 'messages_output') or not self.messages_output:
+            print("Debug: messages_output not available for _apply_scorer_async")
+            # Fallback to print if messages_output isn't ready, though it should be.
+            def display_html_fallback(html_str):
+                print(html_str.replace("<p style='color:red;'>", "ERROR: ").replace("<p style='color:orange;'>", "WARNING: ").replace("<p style='color:green;'>", "INFO: ").replace("</p>", ""))
+        else:
+            def display_html_fallback(html_str): # pylint: disable=function-redefined
+                with self.messages_output:
+                    display(IPythHTML(html_str))
+
+        if not self.target_call:
+            display_html_fallback(
+                "<p style='color:orange;'>Warning: No target_call available to apply scorer.</p>"
+            )
+            return
+
+        final_rankings_data = self.get_final_rankings()
+        if not final_rankings_data:
+            display_html_fallback(
+                "<p style='color:orange;'>Warning: Final rankings not available. Scorer not applied.</p>"
+            )
+            return
+
+        ranking_list = final_rankings_data.get("rankings")
+        ranking_timestamp = final_rankings_data.get("completed_at")
+        if not ranking_list:
+            display_html_fallback(
+                "<p style='color:red;'>Error: 'rankings' key missing in final_rankings_data. Scorer not applied.</p>"
+            )
+            return
+
+        try:
+            # Check if BinaryVoiceRank is defined. If not, we can't proceed.
+            if 'BinaryVoiceRank' not in globals() and 'BinaryVoiceRank' not in locals():
+                 raise NameError("BinaryVoiceRank class is not defined or imported.")
+
+            scorer_instance = BinaryVoiceRank(ranking_list, ranking_timestamp) # type: ignore # noqa
+
+            with self.messages_output: # Ensure this is a clear message
+                self.messages_output.clear_output(wait=True) # Clear previous messages for this step
+                display(IPythHTML("<p>Applying scorer (e.g., BinaryVoiceRank)...</p>"))
+            
+            res = await self.target_call.apply_scorer(scorer_instance)
+            
+            # Append to messages_output, don't clear it here
+            with self.messages_output:
+                display(IPythHTML(f"<p style='color:green;'>BinaryVoiceRank applied successfully to weave call. Result: {res}</p>"))
+
+        except NameError as ne: # Specifically for BinaryVoiceRank not being defined
+             display_html_fallback(f"<p style='color:red;'>Error: {ne}. Scorer `BinaryVoiceRank` cannot be applied. Please ensure it's imported/defined in your notebook or environment.</p>")
+        except Exception as e:
+            display_html_fallback(f"<p style='color:red;'>Error applying scorer: {e}</p>")

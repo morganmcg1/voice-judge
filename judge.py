@@ -1,14 +1,8 @@
-# %% [markdown]
-# # LLM Judge for Generated Speech
-# This notebook generates speech from text using OpenAI's TTS API and 
-
-# %% Install dependencies
 import os
 import json
 
 # os.system("uv pip install openai weave genai")
 
-# %% Imports
 import wave
 import io
 
@@ -19,9 +13,10 @@ import asyncio
 from typing import List, Union, BinaryIO
 from pydantic import BaseModel, Field
 from google import genai
-from google.genai import types
+from google.genai import types as genai_types
 
 import weave
+from weave import Scorer
 
 from voice_prompt_guidelines import GEN_VOICE_GUIDELINES
 
@@ -51,6 +46,51 @@ class JudgeRanking(BaseModel):
 BASE_SYSTEM_INSTRUCTION = """The task is to consider the voice characteristics that lead to the \
 ranking of the audio samples."""
 
+def update_pairwise_comparison_history(samples_to_rank, ranking):
+    for r in ranking["rankings"]:
+        competitor_id = [rr.get("id") for rr in ranking["rankings"] if rr.get("id") != r.get("id")][0]
+        samples_to_rank[r.get("id")]["pairwise_comparison_history"][ranking["completed_at"]] = {
+            "competitor_id": competitor_id,
+            "sample_rank_in_this_pair": r.get("rank"),
+        }
+    return samples_to_rank
+
+
+class BinaryVoiceRank(Scorer):
+    ranking: list
+    timestamp: str
+
+    def __init__(self, rankings: dict, timestamp: str):
+        # self.ranking = rankings["rankings"]
+        # self.timestamp = rankings["completed_at"]
+        super().__init__(
+            ranking=rankings,  # Pass the list for the 'ranking' field
+            timestamp=timestamp,  # Pass the string for the 'timestamp' field
+        )
+
+    @weave.op
+    def score(self, output: str) -> dict:
+        sample_one_preferred = False
+        sample_two_preferred = False
+
+        # Iterate through the ranked items to find the one with rank 1
+        for item in self.ranking:
+            if item["rank"] == 1:
+                if item["original_input_order"] == 1:
+                    sample_one_preferred = True
+                elif item["original_input_order"] == 2:
+                    sample_two_preferred = True
+                preferred_id = item["id"]
+                break
+
+        return {
+            "preferred_sample_id": preferred_id,
+            "sample_one_preferred": sample_one_preferred,
+            "sample_two_preferred": sample_two_preferred,
+            "ranking_timestamp": self.timestamp,
+        }
+
+
 async def get_audio_parts(audio_ls: list, client: genai.Client, initial_prompt: str, prompt_divider: str = "\n\n"):
     audio_parts = [initial_prompt]
     for i, audio in enumerate(audio_ls):
@@ -74,14 +114,14 @@ async def get_audio_parts(audio_ls: list, client: genai.Client, initial_prompt: 
                 with open(audio_path, 'rb') as f:
                     audio_bytes = f.read()
                 mime_type = _get_mime_type(audio_path.suffix)
-                audio_parts.append(types.Part.from_bytes(
+                audio_parts.append(genai_types.Part.from_bytes(
                     data=audio_bytes,
                     mime_type=mime_type
                 ))
                 
         elif isinstance(audio, bytes):
             # Raw bytes - assume MP3 if not specified
-            audio_parts.append(types.Part.from_bytes(
+            audio_parts.append(genai_types.Part.from_bytes(
                 data=audio,
                 mime_type='audio/mp3'
             ))
@@ -95,8 +135,8 @@ async def run_speech_llm(
     model_name: str,
     temperature: float,
     response_model: BaseModel,
-    audio_data: Union[str, bytes, Path, List[Union[str, bytes, Path]]],
     prompt: str,
+    audio_data: Union[str, bytes, Path, List[Union[str, bytes, Path]]] = [],
     system_instruction: str = None,
     max_tokens: int = 4000,
     initial_audio_parts_prompt: str = "\n\nRank 1 voice:\n",
@@ -110,17 +150,23 @@ async def run_speech_llm(
         audio_data = [audio_data]
     
     # Process audio parts
-    parts = [prompt]  # Start with text prompt
+    if isinstance(prompt, str):
+        parts = [prompt]  # Start with text prompt
+    elif isinstance(prompt, list):
+        parts = prompt
+    else:
+        raise ValueError(f"Unsupported prompt type: {type(prompt)}")
 
-    audio_parts = await get_audio_parts(
-        audio_ls=audio_data, 
-        client=client,
-        initial_prompt=initial_audio_parts_prompt,
-        prompt_divider=audio_parts_prompt_divider)
-    parts.extend(audio_parts)
+    if audio_data:
+        audio_parts = await get_audio_parts(
+            audio_ls=audio_data, 
+            client=client,
+            initial_prompt=initial_audio_parts_prompt,
+            prompt_divider=audio_parts_prompt_divider)
+        parts.extend(audio_parts)
     
     # Configure generation with structured output
-    generation_config = types.GenerateContentConfig(
+    generation_config = genai_types.GenerateContentConfig(
         temperature=temperature if temperature > 0 else 1.0,
         max_output_tokens=max_tokens,
         response_mime_type="application/json",
@@ -151,35 +197,3 @@ def _get_mime_type(suffix: str) -> str:
         '.flac': 'audio/flac'
     }
     return mime_map.get(suffix.lower(), 'audio/mp3')
-
-
-# Example usage
-if __name__ == "__main__":
-    weave.init("wandb-voice-ai/voice-judge")
-    print("Downloading speech samples from Weave...")
-    ds_ref = weave.ref(SPEECH_AUDIO_DATASET_URI).get()
-    speech_samples = list(ds_ref.rows)
-
-    audio_obj = speech_samples[0]["audio"]
-    audio_obj_two = speech_samples[1]["audio"]
-    
-    audio_bytes = wave_read_to_wav_bytes(audio_obj)
-    audio_bytes_two = wave_read_to_wav_bytes(audio_obj_two)
-
-    async def example():
-        # Example with file path
-        result = await process_audio_with_gemini(
-            system_instruction=BASE_SYSTEM_INSTRUCTION,
-            prompt="Describe each voice in this audio.",
-            model_name="gemini-2.0-flash",
-            temperature=0.1,
-            response_model=JudgeCriteria,
-            audio_data=[audio_bytes, audio_bytes_two],
-        )
-        return result
-        
-    # Run example
-    result = asyncio.run(example())
-    print(result.thinking)
-    print(result.best_voice)
-
