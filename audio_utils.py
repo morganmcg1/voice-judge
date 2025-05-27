@@ -3,6 +3,7 @@ import uuid
 import wave  # Ensure wave is imported
 import hashlib # For hashing names/ids
 from typing import Any
+import datetime # Added import
 
 import ipywidgets as widgets
 import weave
@@ -41,6 +42,7 @@ class AudioRankerSequential:
     def __init__(
         self,
         audio_samples_input: list,
+        image_path: str = None,
         weave_client: Any = None,
         target_call_id: str = None,
         scorer_name: str = "AudioSequentialRanking",
@@ -55,6 +57,7 @@ class AudioRankerSequential:
                 - A dict: {'name': str, 'audio': wave.Wave_read object or bytes}
                           (tries to find 'name'/'id' and 'audio'/'data' keys)
                           This format is suitable for data like Weave dataset rows.
+            image_path: Path to an image associated with the audio samples.
             weave_client: Optional initialized Weave client for logging feedback.
                           If None, Weave logging is disabled.
             target_call_id: Optional Weave call ID to associate this ranking feedback with.
@@ -68,6 +71,7 @@ class AudioRankerSequential:
         self.scorer_description = scorer_description
         self.scorer_uri = None  # Will be set after publishing
         self.raw_audio_samples = []  # Stores more info now
+        self.image_path = image_path # Store image_path
 
         for i, item in enumerate(audio_samples_input):
             original_input_name = None # This will be the name or id from the input dict/tuple
@@ -228,6 +232,7 @@ class AudioRankerSequential:
         self.unranked_audio_ids = [sample['widget_internal_id'] for sample in self.raw_audio_samples] # Use widget_internal_id here
         self.current_rank_to_assign = 1
         self.final_ranking_list = []
+        self.ranking_completion_timestamp = None # Added timestamp
 
     def _get_unranked_sample_options(self):
         options = [("Select an audio...", None)]
@@ -241,7 +246,7 @@ class AudioRankerSequential:
         return options
 
     def _build_ui(self):
-        audio_display_items = [widgets.HTML("<h3>Listen to Audio Samples:</h3>")]
+        audio_display_items = [widgets.HTML("<h3>Which voice sample suits this character?</h3>")]
         for i, sample in enumerate(self.raw_audio_samples):
             audio_player_out = widgets.Output()
             with audio_player_out:
@@ -252,7 +257,25 @@ class AudioRankerSequential:
                 audio_player_out
             ], layout=widgets.Layout(margin='0 0 10px 0'))
             audio_display_items.append(item_box)
-        audio_players_box = widgets.VBox(audio_display_items)
+        audio_players_vbox = widgets.VBox(audio_display_items) # Renamed for clarity
+
+        # Image display
+        image_widget = None
+        if self.image_path:
+            try:
+                with open(self.image_path, "rb") as f:
+                    image_data = f.read()
+                image_widget = widgets.Image(value=image_data, format='jpg', width=800, height=300) # Set width and height
+            except FileNotFoundError:
+                image_widget = widgets.Label(f"Image not found: {self.image_path}")
+            except Exception as e:
+                image_widget = widgets.Label(f"Error loading image: {e}")
+        
+        # Two-column layout for audio players and image
+        if image_widget:
+            content_hbox = widgets.HBox([audio_players_vbox, image_widget])
+        else:
+            content_hbox = audio_players_vbox # Fallback if no image
 
         self.rank_assignment_label = widgets.Label(value="")
         self.rank_selection_dropdown = widgets.Dropdown(options=[], value=None, layout={'width': 'auto', 'min_width': '250px'})
@@ -271,7 +294,7 @@ class AudioRankerSequential:
         self.messages_output = widgets.Output()
 
         self.widget = widgets.VBox([
-            audio_players_box,
+            content_hbox, # Use the HBox here
             widgets.HTML("<hr style='margin: 20px 0;'>"),
             ranking_controls_box,
             widgets.HTML("<h3>Current Rankings:</h3>"),
@@ -303,6 +326,7 @@ class AudioRankerSequential:
             self.rank_selection_dropdown.value = None
             self.rank_selection_dropdown.disabled = True
             self.assign_rank_button.disabled = True
+            self.ranking_completion_timestamp = datetime.datetime.now() # Set timestamp
             
             self.final_ranking_list = []
             for rank_num in sorted(self.ranked_assignments.keys()):
@@ -325,7 +349,6 @@ class AudioRankerSequential:
                     sample_details = next((s for s in self.raw_audio_samples if s['widget_internal_id'] == audio_widget_id), None)
                     display_label = sample_details['anonymized_label'] if sample_details else f"Unknown (Widget ID: {audio_widget_id})"
                     print(f"  Rank {rank_num}: {display_label}") # (Original ID: {sample_details['id'] if sample_details else 'N/A'}
-                print("\n(Logged data uses original IDs and input order)")
 
                 # Log to Weave if client, call_id, and scorer_uri are available
                 if self.weave_client and self.target_call_id and self.scorer_uri:
@@ -418,8 +441,11 @@ class AudioRankerSequential:
         Each item in the list is a dict: {'rank': int, 'id': str, 'original_input_order': int, 'short_hash': str}
         Returns None if ranking is not complete.
         """
-        if not self.unranked_audio_ids and self.final_ranking_list:
-            return self.final_ranking_list
+        if not self.unranked_audio_ids and self.final_ranking_list and self.ranking_completion_timestamp:
+            return {
+                "rankings": self.final_ranking_list,
+                "completed_at": self.ranking_completion_timestamp.strftime("%Y-%m-%d_%H-%M")
+            }
         else:
             # print("Ranking is not yet complete or has been reset.") # Console noise
             return None
